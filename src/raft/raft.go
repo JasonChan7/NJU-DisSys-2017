@@ -150,6 +150,7 @@ type RequestVoteReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
@@ -160,8 +161,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		reply.Success = true
 	}
-	rf.appendChan <- struct{}{}
-	rf.mu.Unlock()
+	// rf.appendChan <- struct{}{}
+	go func() { rf.appendChan <- struct{}{} }()
+	// rf.mu.Unlock()
 }
 //
 // example RequestVote RPC handler.
@@ -169,20 +171,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
 	rf.mu.Lock()
-	// fmt.Printf("server %d receive RequestVote from server %d\n", rf.me, args.CandidateId)
-	// fmt.Printf("rf Term %d, args Term %d\n", rf.currentTerm, args.Term)
+	defer rf.mu.Unlock()
+	fmt.Printf("server %d receive RequestVote from server %d\n", rf.me, args.CandidateId)
+	fmt.Printf("rf Term %d, args Term %d\n", rf.currentTerm, args.Term)
 	if args.Term < rf.currentTerm {
 		// fmt.Println("1")
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 	} else if args.Term > rf.currentTerm {
-		// fmt.Println("2")
+		fmt.Println("rv2")
+		rf.UpdateTo(FOLLOWER)
 		rf.currentTerm = args.Term
 		rf.votedFor = args.CandidateId
-		rf.UpdateTo(FOLLOWER)
 		reply.VoteGranted = true
 	} else if rf.votedFor == -1 {
-		// fmt.Println("3")
+		fmt.Println("rv3")
+		rf.UpdateTo(FOLLOWER)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	} else {
@@ -192,10 +196,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	// fmt.Printf("rf Term %d, args Term %d\n", rf.currentTerm, args.Term)
 	if reply.VoteGranted == true {
-		// fmt.Println("Granted")
-		rf.voteChan <- struct{}{}
+		fmt.Println("Granted")
+		// rf.voteChan <- struct{}{}
+		go func() { rf.voteChan <- struct{}{} }()
 	}
-	rf.mu.Unlock()
+	// rf.mu.Unlock()
 }
 
 //
@@ -293,21 +298,24 @@ func GetElectionTimeout() time.Duration {
 func (rf *Raft) Loop() {
 	rf.electionTimer = time.NewTimer(GetElectionTimeout())
 	for {
-		switch rf.state {
+		currentState := rf.state
+		switch currentState {
 		case FOLLOWER:
 			select {
 			// 成功投票
 			case <-rf.voteChan:
+				fmt.Printf("server %d recevied voteChan\n", rf.me)
 				rf.electionTimer.Reset(GetElectionTimeout())
 			// 收到 log 更新的消息
 			case <-rf.appendChan:
+				fmt.Printf("server %d recevied appendChan\n", rf.me)
 				rf.electionTimer.Reset(GetElectionTimeout())
 			// 超时消息
 			case <-rf.electionTimer.C:
-				// rf.mu.Lock()
+				rf.mu.Lock()
 				rf.UpdateTo(CANDIDATE)
 				rf.StartElection()
-				// rf.mu.Unlock()
+				rf.mu.Unlock()
 			}
 		case CANDIDATE:
 			rf.mu.Lock()
@@ -328,20 +336,22 @@ func (rf *Raft) Loop() {
 			}
 			rf.mu.Unlock()
 		case LEADER:
-			select {
-			// dicovers server with higher term
-			case <-rf.appendChan:
-				rf.UpdateTo(FOLLOWER)
-			default:
-				rf.SendAppendEntriesToAll()
-				time.Sleep(HEARTBEAT_INTERVAL*time.Millisecond)
-			}
+			// select {
+			// // dicovers server with higher term
+			// case <-rf.appendChan:
+			// 	rf.UpdateTo(FOLLOWER)
+			// default:
+			fmt.Printf("current server %d send heart-beats\n", rf.me)
+			rf.SendAppendEntriesToAll()
+			time.Sleep(HEARTBEAT_INTERVAL*time.Millisecond)
+			// }
 		}
 	}
 }
 
 func (rf *Raft) UpdateTo(state ServerState) {
 	// rf.mu.Lock()
+	// defer rf.mu.Unlock()
 	currState := rf.state
 	// fmt.Printf("rf is in state %s, will update to state %s\n", currState, state)
 	if currState == state {
