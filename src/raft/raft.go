@@ -321,11 +321,12 @@ func (rf *Raft) Loop() {
 			case <-rf.electionTimer.C:
 				rf.mu.Lock()
 				rf.UpdateTo(CANDIDATE)
-				rf.StartElection()
 				rf.mu.Unlock()
+				rf.electionTimer.Reset(GetElectionTimeout())
+				rf.StartElection()
 			}
 		case CANDIDATE:
-			rf.mu.Lock()
+			// rf.mu.Lock()
 			select {
 			// discovers current leader or new term
 			case <-rf.appendChan:
@@ -341,7 +342,7 @@ func (rf *Raft) Loop() {
 					rf.UpdateTo(LEADER)
 				}
 			}
-			rf.mu.Unlock()
+			// rf.mu.Unlock()
 		case LEADER:
 			select {
 			// dicovers server with higher term
@@ -350,7 +351,7 @@ func (rf *Raft) Loop() {
 				rf.UpdateTo(FOLLOWER)
 			default:
 				fmt.Printf("current server %d send heart-beats\n", rf.me)
-				rf.SendAppendEntriesToAll()
+				rf.StartAppend()
 				time.Sleep(HEARTBEAT_INTERVAL*time.Millisecond)
 			}
 		}
@@ -422,13 +423,14 @@ func (rf *Raft) StartElection() {
 			}(i)
 			// if rf.state == CANDIDATE && rf.sendRequestVote(i, &reqVoteArgs, &replies[i]) {
 			// 	rf.mu.Lock()
+			// 	defer rf.mu.Unlock()
 			// 	if replies[i].VoteGranted {
 			// 		rf.votedGot += 1
 			// 	} else if replies[i].Term > rf.currentTerm {
 			// 		rf.currentTerm = replies[i].Term
 			// 		rf.UpdateTo(FOLLOWER)
 			// 	}
-			// 	rf.mu.Unlock()
+			// 	// rf.mu.Unlock()
 			// } else {
 			// 	fmt.Printf("server %d now is in state %s, send RequestVote failed\n", rf.me, rf.state)
 			// }
@@ -445,7 +447,7 @@ func (rf *Raft) GetLastLogInfo() (int, int) {
 	return 0, 0
 }
 
-func (rf *Raft) SendAppendEntriesToAll() {
+func (rf *Raft) StartAppend() {
 	lastIndex, lastTerm := rf.GetLastLogInfo()
 	args := AppendEntriesArgs {
 		Term:			rf.currentTerm,
