@@ -309,6 +309,7 @@ func (cfg *config) checkNoLeader() {
 		if cfg.connected[i] {
 			_, is_leader := cfg.rafts[i].GetState()
 			if is_leader {
+				fmt.Printf("server %d is leader?\n", i)
 				cfg.t.Fatalf("expected no leader, but %v claims to be leader", i)
 			}
 		}

@@ -156,13 +156,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
+		// fmt.Println("ae2U")
 		rf.UpdateTo(FOLLOWER)
+		// fmt.Println("ae2D")
 		reply.Success = true
 	} else {
+		// fmt.Println("ae3U")
+		rf.UpdateTo(FOLLOWER)
+		// fmt.Println("ae3D")
 		reply.Success = true
 	}
 	// rf.appendChan <- struct{}{}
-	go func() { rf.appendChan <- struct{}{} }()
+	if reply.Success {
+		go func() { rf.appendChan <- struct{}{} }()
+	}
 	// rf.mu.Unlock()
 }
 //
@@ -179,13 +186,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 	} else if args.Term > rf.currentTerm {
-		fmt.Println("rv2")
+		// fmt.Println("rv2")
 		rf.UpdateTo(FOLLOWER)
 		rf.currentTerm = args.Term
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	} else if rf.votedFor == -1 {
-		fmt.Println("rv3")
+		// fmt.Println("rv3")
 		rf.UpdateTo(FOLLOWER)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
@@ -336,15 +343,16 @@ func (rf *Raft) Loop() {
 			}
 			rf.mu.Unlock()
 		case LEADER:
-			// select {
-			// // dicovers server with higher term
-			// case <-rf.appendChan:
-			// 	rf.UpdateTo(FOLLOWER)
-			// default:
-			fmt.Printf("current server %d send heart-beats\n", rf.me)
-			rf.SendAppendEntriesToAll()
-			time.Sleep(HEARTBEAT_INTERVAL*time.Millisecond)
-			// }
+			select {
+			// dicovers server with higher term
+			case <-rf.appendChan:
+				fmt.Println("???")
+				rf.UpdateTo(FOLLOWER)
+			default:
+				fmt.Printf("current server %d send heart-beats\n", rf.me)
+				rf.SendAppendEntriesToAll()
+				time.Sleep(HEARTBEAT_INTERVAL*time.Millisecond)
+			}
 		}
 	}
 }
@@ -445,32 +453,32 @@ func (rf *Raft) SendAppendEntriesToAll() {
 		PrevLogIndex:	lastIndex,
 		PrevLogTerm:	lastTerm,
 	}
-	replies := make([]AppendEntriesReply, len(rf.peers))
+	// replies := make([]AppendEntriesReply, len(rf.peers))
 	for i := range rf.peers {
 		if i != rf.me && rf.state == LEADER {
-			if rf.SendAppendEntries(i, &args, &replies[i]) {
-				rf.mu.Lock()
-				if replies[i].Success != true {
-					if replies[i].Term > rf.currentTerm {
-						rf.currentTerm = replies[i].Term
-						rf.UpdateTo(FOLLOWER)
-					}
-				}
-				rf.mu.Unlock()
-			}
-			// go func(server int) {
-			// 	var reply AppendEntriesReply
-			// 	if rf.state == LEADER && rf.SendAppendEntries(server, &args, &reply) {
-			// 		rf.mu.Lock()
-			// 		defer rf.mu.Unlock()
-			// 		if reply.Success != true {
-			// 			if reply.Term > rf.currentTerm {
-			// 				rf.currentTerm = reply.Term
-			// 				rf.UpdateTo(FOLLOWER)
-			// 			}
+			// if rf.SendAppendEntries(i, &args, &replies[i]) {
+			// 	rf.mu.Lock()
+			// 	if replies[i].Success != true {
+			// 		if replies[i].Term > rf.currentTerm {
+			// 			rf.currentTerm = replies[i].Term
+			// 			rf.UpdateTo(FOLLOWER)
 			// 		}
 			// 	}
-			// }(i)
+			// 	rf.mu.Unlock()
+			// }
+			go func(server int) {
+				var reply AppendEntriesReply
+				if rf.state == LEADER && rf.SendAppendEntries(server, &args, &reply) {
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+					if reply.Success != true {
+						if reply.Term > rf.currentTerm {
+							rf.currentTerm = reply.Term
+							rf.UpdateTo(FOLLOWER)
+						}
+					}
+				}
+			}(i)
 		}
 	}
 }
