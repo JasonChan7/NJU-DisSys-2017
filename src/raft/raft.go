@@ -377,7 +377,7 @@ func (rf *Raft) UpdateTo(state ServerState) {
 	case LEADER:
 		rf.state = LEADER
 	}
-	fmt.Printf("In term %d: Server %d transfer from %s to %s\n", rf.currentTerm, rf.me, currState, state)
+	fmt.Printf("In term %d: Server %d update from %s to %s\n", rf.currentTerm, rf.me, currState, state)
 	// rf.mu.Unlock()
 }
 
