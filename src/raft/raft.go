@@ -72,7 +72,13 @@ type Raft struct {
 	voteChan	chan struct{} // 成功投票的信号
 	appendChan	chan struct{} // 成功更新 log 的信号
 
-	log		[]LogEntry
+	// log consensus
+	log				[]LogEntry	
+	commitIndex		int			// 大部分 server 达成一致的 log
+	lastApplied		int			// 本 server 已经执行的 log 最后下标
+	nextIndex		[]int		// 每个 server 上复制 LogEntry 的起点
+	matchIndex		[]int		// 每个 server 上已经和 leader 一致的最高 index，理想情况下 matchIndex[i]=nextIndex[i]+1
+	applyChan		chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -117,15 +123,16 @@ func (rf *Raft) readPersist(data []byte) {
 type AppendEntriesArgs struct {
 	Term 			int
 	LeaderId		int
-	PrevLogIndex	int
-	PrevLogTerm		int
-	// Entries			[]LogEntry
-	// LeaderCommit	int
+	PrevLogIndex	int			// leader 认为 follower 最后一个匹配的位置
+	PrevLogTerm		int			// PrevLogIndex 位置的 LogEntry 的 Term
+	Entries			[]LogEntry	// leader 的 log[PrevLogIndex+1:]
+	LeaderCommit	int			// leader 的 commitIndex
 }
 
 type AppendEntriesReply struct {
 	Term		int
 	Success		bool
+	NextTrial	int
 }
 
 //
@@ -149,11 +156,20 @@ type RequestVoteReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	inform := func() {
+		go func() {
+			rf.appendChan <- struct{}{}
+		}()
+	}
 	rf.mu.Lock()
+	defer inform()
 	defer rf.mu.Unlock()
+	// 
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
+		// should return？？？
+		return
 	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		// fmt.Println("ae2U")
@@ -166,10 +182,57 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// fmt.Println("ae3D")
 		reply.Success = true
 	}
-	// rf.appendChan <- struct{}{}
-	if reply.Success {
-		go func() { rf.appendChan <- struct{}{} }()
+
+	// log consensus
+	// 当前 server 的最后一个日志的 index 小于 leader 认为它应处于的位置（不匹配）
+	if args.PrevLogIndex > rf.GetLastLogIndex() {
+		reply.Success = false
+		reply.NextTrial = rf.GetLastLogIndex()+1
+		return
 	}
+	// not in the same term
+	if args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
+		reply.Success = false
+		// 获取应处于的时间片id
+		badTerm := rf.log[args.PrevLogIndex].Term
+		i := args.PrevLogIndex
+		for ; rf.log[i].Term == badTerm; i-- {
+			// 找到最后一个处于应处于的时间片的 LogEntry 的 index
+		}
+		reply.NextTrial = i+1
+		return
+	}
+	conflictIdx := -1
+	if rf.GetLastLogIndex() < args.PrevLogIndex+len(args.Entries) {
+		conflictIdx = args.PrevLogIndex+1
+	} else {
+		for idx:=0; idx<len(args.Entries); idx++ {
+			// 依次检查每个位置上的 Term 是否一致
+			if rf.log[idx+args.PrevLogIndex+1].Term != args.Entries[idx].Term {
+				conflictIdx = idx+args.PrevLogIndex+1
+				break
+			}
+		}
+	}
+	if conflictIdx != -1 {
+		// ...是什么？？？
+		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+	}
+
+	// commit
+	if args.LeaderCommit > rf.commitIndex {
+		// rf.commitIndex = max(rf.GetLastLogIndex(), args.LeaderCommit)
+		if args.LeaderCommit < rf.GetLastLogIndex() {
+			rf.commitIndex = rf.GetLastLogIndex()
+		} else {
+			rf.commitIndex = args.LeaderCommit
+		}
+	}
+
+	// rf.appendChan <- struct{}{}
+	// if reply.Success {
+	// 	go func() { rf.appendChan <- struct{}{} }()
+	// }
 	// rf.mu.Unlock()
 }
 //
@@ -202,6 +265,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 	}
 	// fmt.Printf("rf Term %d, args Term %d\n", rf.currentTerm, args.Term)
+	// log consensus
+	rfLastLogTerm := rf.log[rf.GetLastLogIndex()].Term
+	if rfLastLogTerm > args.LastLogTerm {
+		// 自己处于更新的时间片
+		reply.VoteGranted = false
+	} else if rfLastLogTerm == args.LastLogTerm {
+		// 自己的日志的 index 更新
+		if rf.GetLastLogIndex() > args.LastLogIndex {
+			reply.VoteGranted = false
+		}
+	}
+
 	if reply.VoteGranted == true {
 		fmt.Println("Granted")
 		// rf.voteChan <- struct{}{}
@@ -255,6 +330,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
+	term, isLeader = rf.GetState()
+	if isLeader == true {
+		rf.mu.Lock()
+		index = len(rf.log)
+		rf.log = append(rf.log, LogEntry{term, index, command})
+		rf.mu.Unlock()
+	}
 
 	return index, term, isLeader
 }
@@ -292,6 +374,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1 // default for no server, server id start from 0
 	rf.voteChan = make(chan struct{})
 	rf.appendChan = make(chan struct{})
+
+	// log consensus
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	rf.applyChan = applyCh
+	rf.log = make([]LogEntry, 1)
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	go rf.Loop()
@@ -344,17 +433,19 @@ func (rf *Raft) Loop() {
 			}
 			// rf.mu.Unlock()
 		case LEADER:
-			select {
-			// dicovers server with higher term
-			case <-rf.appendChan:
-				fmt.Println("???")
-				rf.UpdateTo(FOLLOWER)
-			default:
-				fmt.Printf("current server %d send heart-beats\n", rf.me)
-				rf.StartAppend()
-				time.Sleep(HEARTBEAT_INTERVAL*time.Millisecond)
-			}
+			// select {
+			// // dicovers server with higher term
+			// case <-rf.appendChan:
+			// 	fmt.Println("???")
+			// 	rf.UpdateTo(FOLLOWER)
+			// default:
+			fmt.Printf("current server %d send heart-beats\n", rf.me)
+			rf.StartAppend()
+			rf.UpdateCommitIndex()
+			time.Sleep(HEARTBEAT_INTERVAL*time.Millisecond)
+			// }
 		}
+		go rf.applyLog()
 	}
 }
 
@@ -375,6 +466,11 @@ func (rf *Raft) UpdateTo(state ServerState) {
 	case CANDIDATE:
 		rf.state = CANDIDATE
 	case LEADER:
+		// log consensus
+		for i, _ := range rf.peers {
+			rf.nextIndex[i] = rf.GetLastLogIndex()+1
+			rf.matchIndex[i] = 0
+		}
 		rf.state = LEADER
 	}
 	fmt.Printf("In term %d: Server %d update from %s to %s\n", rf.currentTerm, rf.me, currState, state)
@@ -447,40 +543,98 @@ func (rf *Raft) GetLastLogInfo() (int, int) {
 	return 0, 0
 }
 
+func (rf *Raft) GetLastLogIndex() int {
+	return len(rf.log)-1
+}
+ 
 func (rf *Raft) StartAppend() {
-	lastIndex, lastTerm := rf.GetLastLogInfo()
-	args := AppendEntriesArgs {
-		Term:			rf.currentTerm,
-		LeaderId:		rf.me,
-		PrevLogIndex:	lastIndex,
-		PrevLogTerm:	lastTerm,
-	}
-	// replies := make([]AppendEntriesReply, len(rf.peers))
-	for i := range rf.peers {
-		if i != rf.me && rf.state == LEADER {
-			// if rf.SendAppendEntries(i, &args, &replies[i]) {
-			// 	rf.mu.Lock()
-			// 	if replies[i].Success != true {
-			// 		if replies[i].Term > rf.currentTerm {
-			// 			rf.currentTerm = replies[i].Term
-			// 			rf.UpdateTo(FOLLOWER)
-			// 		}
-			// 	}
-			// 	rf.mu.Unlock()
-			// }
-			go func(server int) {
-				var reply AppendEntriesReply
-				if rf.state == LEADER && rf.SendAppendEntries(server, &args, &reply) {
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
-					if reply.Success != true {
-						if reply.Term > rf.currentTerm {
-							rf.currentTerm = reply.Term
-							rf.UpdateTo(FOLLOWER)
-						}
-					}
+	sendAppendEntriesTo := func(server int) bool {
+		// 该函数返回 true 代表需要重试，否则返回false
+		var args AppendEntriesArgs
+		rf.mu.Lock()
+		args.Term = rf.currentTerm
+		args.LeaderId = rf.me
+		args.LeaderCommit = rf.commitIndex
+		args.PrevLogIndex = rf.nextIndex[server] - 1
+		args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+		if rf.GetLastLogIndex() >= rf.nextIndex[server] {
+			args.Entries = rf.log[rf.nextIndex[server]:]
+		}
+		rf.mu.Unlock()
+
+		var reply AppendEntriesReply
+
+		// 发送是并行的
+		if rf.state == LEADER && rf.SendAppendEntries(server, &args, &reply) {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if reply.Success == true {
+				rf.nextIndex[server] += len(args.Entries)
+				rf.matchIndex[server] = rf.nextIndex[server] - 1
+			} else {
+				// ****** 易错点 ******
+				// 由于并行发送，可能收到多个回复
+				// 如果已经在之前的回复中失去了 LEADER 身份
+				// 则直接不处理其他回复了
+				if rf.state != LEADER {
+					return false
 				}
-			}(i)
+
+				if reply.Term > rf.currentTerm {
+					// term 不匹配
+					rf.currentTerm = reply.Term
+					rf.UpdateTo(FOLLOWER)
+				} else {
+					// log 不匹配
+					rf.nextIndex[server] = reply.NextTrial
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for i, _ := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go func(server int) {
+			for {
+				if sendAppendEntriesTo(server) == false {
+					break
+				}
+			}
+		}(i)
+	}
+}
+// log consensus
+func (rf *Raft) UpdateCommitIndex() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for i := rf.GetLastLogIndex(); i > rf.commitIndex; i-- {
+		matchedCount := 1
+		for j, matched := range rf.matchIndex {
+			if j == rf.me {
+				continue
+			}
+			if matched > rf.commitIndex {
+				matchedCount += 1
+			}
+		}
+		if matchedCount > len(rf.peers)/2 {
+			rf.commitIndex = i
+			break
+		}
+	}
+}
+func (rf *Raft) applyLog() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.commitIndex > rf.lastApplied {
+		for i := rf.lastApplied+1; i <= rf.commitIndex; i++ {
+			var msg ApplyMsg
+			msg.Index = i
+			msg.Command = rf.log[i].Command
+			rf.applyChan <- msg
 		}
 	}
 }
